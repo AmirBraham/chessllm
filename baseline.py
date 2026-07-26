@@ -20,6 +20,7 @@ import argparse
 import json
 import random
 import statistics as st
+from pathlib import Path
 
 import chess
 
@@ -68,6 +69,14 @@ def run_model(model, tok, engine, boards, histories, include_legal_moves,
         row["answered"] = raw is not None
         row["tokens"] = length
         row["truncated"] = length >= max_new_tokens
+        # Kept so the run can be read afterwards, not just scored. A number
+        # without the completion behind it cannot tell you *why* the model
+        # failed -- whether it misread the position, named an illegal move, or
+        # never got to an answer.
+        row["fen"] = board.fen()
+        row["move"] = board.san(move) if move else None
+        row["raw"] = raw
+        row["completion"] = text
         rows.append(row)
 
     return rows
@@ -152,9 +161,17 @@ def main():
         results.append(summarize(label, rows))
 
     if args.out:
-        with open(args.out, "w") as f:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with out.open("w") as f:
             json.dump(results, f, indent=1)
-        print(f"\nwrote {args.out}")
+        print(f"\nwrote {out}")
+
+        try:
+            from plot import plot_results
+            print(f"wrote {plot_results(out)}")
+        except ImportError as exc:
+            print(f"(no charts: {exc})")
 
 
 if __name__ == "__main__":
