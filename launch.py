@@ -48,20 +48,33 @@ POD_PACKAGES = "chess transformers matplotlib pyarrow huggingface_hub tqdm"
 
 # Debian puts stockfish in /usr/games, which is not on root's PATH.
 SYSTEM_SETUP = f"""
-set -euo pipefail
+set -eo pipefail
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq && apt-get install -y -qq stockfish rsync
+apt-get update -qq && apt-get install -y -qq stockfish rsync python3-venv
 mkdir -p {WORKDIR}
 echo "--- system setup done ---"
 """
 
+POD_ENV = f"""
+# A pod's real environment lives in PID 1, not in a login shell -- a
+# non-interactive `bash -s` sees neither, and .bashrc usually early-returns
+# for non-interactive shells anyway.
+[ -f /etc/rp_environment ] && . /etc/rp_environment || true
+while IFS= read -r -d '' line; do export "$line"; done < /proc/1/environ || true
+export PATH="{WORKDIR}/.venv/bin:/usr/games:$PATH"
+"""
+
 PROJECT_SETUP = f"""
-set -euo pipefail
-export PATH="/usr/games:$PATH"
+set -eo pipefail
+{POD_ENV}
 cd {WORKDIR}
 
-python -m pip install --no-cache-dir -q {POD_PACKAGES} \
-  || python -m pip install --no-cache-dir -q --break-system-packages {POD_PACKAGES}
+# A venv, not the system interpreter. Ubuntu 24.04 marks its Python
+# externally-managed (PEP 668), and --break-system-packages overwrote enough
+# of it to kill the ssh session outright. --system-site-packages keeps the
+# image's driver-matched torch visible without reinstalling it.
+python3 -m venv --system-site-packages .venv
+python -m pip install -q --no-cache-dir {POD_PACKAGES}
 
 # Hard gate. torch falls back to CPU silently when its CUDA build is newer
 # than the host driver -- a cu13 wheel on a 570.x driver (CUDA 12.8) reports
@@ -351,7 +364,7 @@ def main():
         print(f"\n--- running: {args.command} ---\n")
         ssh(
             ip, port,
-            f'export PATH="/usr/games:$PATH"\n'
+            f"{POD_ENV}\n"
             f"cd {WORKDIR}\n"
             f"{args.command}\n",
             key=identity,
