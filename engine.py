@@ -17,6 +17,14 @@ class Engine:
     Fixed depth (not fixed time) with Threads=1 keeps evaluations
     deterministic, so a reward computed on this laptop is reproducible on a
     rented GPU tomorrow. Time-based limits would make runs incomparable.
+
+    Depth and thread count alone are not enough for that, though: Stockfish's
+    transposition table persists across analyse calls, so the same position at
+    the same depth answers differently depending on what was analysed before
+    it. Every analyse below passes a fresh `game` sentinel, which makes
+    python-chess send `ucinewgame` and clear the table, so a score depends only
+    on the position -- not on call order, batch size, or dataset shuffling.
+    this might make the engine slower, but it makes the reward function deterministic across runs
     """
 
     def __init__(self, path=None, depth=12, threads=1, hash_mb=128):
@@ -42,8 +50,12 @@ class Engine:
     def top_moves(self, board, k=1):
         """[(move, cp), ...] best-first. cp is from the side-to-move's POV.
         might returns fewer than k entries when the position has fewer legal moves.
+
+        Scores are comparable across calls with the same k, but not across
+        different k: multi-PV search prunes differently, so top_moves(b, 3)[0]
+        and top_moves(b, 1)[0] agree on the move and disagree on the number.
         """
-        infos = self.engine.analyse(board, self.limit, multipv=k)
+        infos = self.engine.analyse(board, self.limit, multipv=k, game=object())
         return [
             (
                 info["pv"][0],
@@ -78,7 +90,7 @@ class Engine:
             elif board.is_stalemate() or board.is_insufficient_material():
                 after_cp = 0
             else:
-                info = self.engine.analyse(board, self.limit)
+                info = self.engine.analyse(board, self.limit, game=object())
                 # pov(mover) pins the sign to the player who made the move.
                 # Without it the score would be from the opponent's side and
                 # the reward would prefer blunders.
