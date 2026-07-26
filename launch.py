@@ -23,7 +23,7 @@ import runpod
 from dotenv import load_dotenv
 from runpod.error import QueryError
 
-IMAGE = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
+IMAGE = "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"  # torch 2.8, cu12.8
 WORKDIR = "/workspace/chessllm"
 # Preference order, passphrase-less automation key first. A key with a
 # passphrase cannot be used unattended: ssh silently skips it, falls back to
@@ -51,7 +51,27 @@ echo "--- system setup done ---"
 PROJECT_SETUP = f"""
 set -euo pipefail
 export PATH="$HOME/.local/bin:/usr/games:$PATH"
-cd {WORKDIR} && uv sync -q
+# Reuse the image's torch instead of downloading our own: --system-site-packages
+# lets the venv see it, --no-install-package skips it, --inexact leaves it
+# alone rather than pruning it as unmanaged. Saves a ~2.5GB CUDA wheel per run,
+# and the image's build is matched to the host driver.
+# Not -q: silent output here is indistinguishable from a hang.
+cd {WORKDIR}
+uv venv --system-site-packages
+uv sync --inexact --no-install-package torch
+
+# Hard gate. torch falls back to CPU silently when its CUDA build is newer
+# than the host driver -- a pip-pulled cu13x wheel on a 570.x driver (CUDA
+# 12.8) reports cuda.is_available() == False and everything still "works",
+# just 50x slower on a GPU you are paying for.
+uv run --no-sync python - <<'PY'
+import sys, torch
+print(f"torch {{torch.__version__}}  cuda_available={{torch.cuda.is_available()}}")
+if not torch.cuda.is_available():
+    print(f"built for CUDA {{torch.version.cuda}}, but this host's driver does not support it")
+    sys.exit(1)
+print(f"device: {{torch.cuda.get_device_name(0)}}")
+PY
 echo "--- deps installed ---"
 """
 
@@ -152,6 +172,7 @@ def create_pod(args, candidates, pubkey):
                 start_ssh=True,
                 ports="22/tcp",
                 env={"PUBLIC_KEY": pubkey},
+                allowed_cuda_versions=args.cuda,
             )
             print(f"got {label}")
             return pod
@@ -262,6 +283,9 @@ def main():
     parser.add_argument("--image", default=IMAGE)
     parser.add_argument("--disk", type=int, default=40, help="container disk GB")
     parser.add_argument("--cloud", default="ALL", choices=["ALL", "COMMUNITY", "SECURE"])
+    parser.add_argument("--cuda", nargs="+", default=["12.8", "12.9"],
+                        help="acceptable host CUDA versions; filters out hosts "
+                             "whose driver is too old for the image's torch")
     parser.add_argument("--ssh-key", default=None,
                         help="private key to use (default: ssh picks it)")
     parser.add_argument("--keep", action="store_true",
@@ -321,7 +345,10 @@ def main():
             ip, port,
             f'export PATH="$HOME/.local/bin:/usr/games:$PATH"\n'
             f"cd {WORKDIR}\n"
-            f"uv run {args.command}\n",
+            # --no-sync: a plain `uv run` re-syncs first and would reinstall
+            # the torch we deliberately skipped, pulling the cu13 wheel back
+            # in and putting us on CPU again.
+            f"uv run --no-sync {args.command}\n",
             key=identity,
             check=False,
         )

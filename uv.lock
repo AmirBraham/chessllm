@@ -703,7 +703,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "requests", specifier = ">=2.34.2" },
     { name = "runpod", specifier = ">=1.11.0" },
-    { name = "torch", specifier = ">=2.13.0" },
+    { name = "torch", specifier = ">=2.4" },
     { name = "tqdm", specifier = ">=4.69.1" },
     { name = "transformers", specifier = ">=5.14.1" },
 ]

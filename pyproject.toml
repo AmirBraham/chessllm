@@ -11,7 +11,10 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "requests>=2.34.2",
     "runpod>=1.11.0",
-    "torch>=2.13.0",
+    # transformers' actual floor. Deliberately loose: the RunPod image ships
+    # its own torch and the pod venv reuses it instead of downloading a second
+    # CUDA wheel, so this must not demand a newer one.
+    "torch>=2.4",
     "tqdm>=4.69.1",
     "transformers>=5.14.1",
 ]
