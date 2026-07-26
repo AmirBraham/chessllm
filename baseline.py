@@ -1,0 +1,156 @@
+"""Baseline: how good are the model's chess moves, measured in centipawns?
+
+The headline is mean cp_loss -- how much the chosen move gives up against
+Stockfish's best. It is reported next to two references measured on the same
+positions, because the number is meaningless alone:
+
+    random legal move   ~377 cp   the floor to beat
+    Stockfish's own     ~10 cp    the ceiling (nonzero: the search is one ply
+                                  deeper after the move than at the root)
+
+Top-1 agreement with Stockfish is deliberately not reported. On these
+positions a random move scores 1% against a 3.4% chance rate -- the metric has
+no resolution at this skill level.
+
+Run this on a GPU box; batched generation over a few hundred positions is slow
+on a laptop.
+"""
+
+import argparse
+import json
+import random
+import statistics as st
+
+import chess
+
+from board import build_prompt, parse_move
+from engine import Engine
+from qwen3 import generate, load
+
+GOOD_MOVE_CP = 50  # "reasonable move" threshold
+
+
+def score(engine, board, move):
+    """One result row. `move` is a legal chess.Move, or None."""
+    return {
+        "legal": move is not None,
+        "cp_loss": engine.cp_loss(board, move) if move else None,
+    }
+
+
+def run_random(engine, boards, seed=0):
+    rng = random.Random(seed)
+    return [score(engine, b, rng.choice(list(b.legal_moves))) for b in boards]
+
+
+def run_stockfish(engine, boards):
+    return [score(engine, b, engine.best(b)[0]) for b in boards]
+
+
+def run_model(model, tok, engine, boards, include_board, include_legal_moves,
+              max_new_tokens, batch_size, think):
+    rows = []
+    for start in range(0, len(boards), batch_size):
+        chunk = boards[start:start + batch_size]
+        prompts = [
+            build_prompt(b, include_board, include_legal_moves) for b in chunk
+        ]
+        texts, lengths = generate(
+            model, tok, prompts, max_new_tokens=max_new_tokens, think=think
+        )
+
+        for board, text, length in zip(chunk, texts, lengths):
+            move, raw = parse_move(board, text)
+            row = score(engine, board, move)
+            row["parsed"] = raw is not None
+            row["tokens"] = length
+            # Used the whole budget, so it never reached an answer. Any move
+            # parsed out of it was scraped from mid-reasoning, not chosen.
+            row["truncated"] = length >= max_new_tokens
+            rows.append(row)
+
+        print(f"  {min(start + batch_size, len(boards))}/{len(boards)}")
+    return rows
+
+
+def summarize(name, rows):
+    n = len(rows)
+    losses = [r["cp_loss"] for r in rows if r["cp_loss"] is not None]
+
+    print(f"\n{name}  (n={n})")
+    if not losses:
+        print("  no legal moves produced")
+    else:
+        good = sum(1 for x in losses if x <= GOOD_MOVE_CP) / len(losses)
+        print(f"  mean cp_loss     {st.mean(losses):6.0f}")
+        print(f"  median cp_loss   {st.median(losses):6.0f}")
+        print(f"  good moves <={GOOD_MOVE_CP}cp  {good:6.1%}")
+
+    if "parsed" in rows[0]:
+        rate = lambda k: sum(1 for r in rows if r[k]) / n  # noqa: E731
+        print(f"  parse rate       {rate('parsed'):6.1%}")
+        print(f"  legal rate       {rate('legal'):6.1%}")
+        print(f"  truncated        {rate('truncated'):6.1%}")
+        print(f"  mean tokens      {st.mean(r['tokens'] for r in rows):6.0f}")
+    return {"name": name, "n": n, "rows": rows}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--positions", default="data/positions.json")
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--out", default=None, help="write raw rows to JSON")
+    parser.add_argument("--batch-size", type=int, default=16)
+    # No local probe was possible, so this default is a guess. The truncation
+    # rate in the output tells you whether it was big enough: if it is not
+    # near zero, raise this or pass --no-think.
+    parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--no-think", action="store_true",
+                        help="disable Qwen3 thinking mode (much shorter, cheaper)")
+    parser.add_argument("--no-board", action="store_true",
+                        help="drop the ASCII board from the prompt")
+    parser.add_argument("--no-legal-moves", action="store_true",
+                        help="drop the legal-move list from the prompt")
+    parser.add_argument("--skip-refs", action="store_true",
+                        help="skip the random and Stockfish reference rows")
+    args = parser.parse_args()
+
+    with open(args.positions) as f:
+        records = json.load(f)
+    if args.limit:
+        records = records[:args.limit]
+    boards = [chess.Board(r["fen"]) for r in records]
+    print(f"{len(boards)} positions from {args.positions}")
+
+    results = []
+    with Engine(depth=12, threads=1) as engine:
+        if not args.skip_refs:
+            print("\nreferences...")
+            results.append(summarize("random legal move", run_random(engine, boards)))
+            results.append(summarize("stockfish best", run_stockfish(engine, boards)))
+
+        label = (
+            f"qwen3-0.6B board={not args.no_board} "
+            f"legal={not args.no_legal_moves} think={not args.no_think}"
+        )
+        print(f"\nloading model...")
+        model, tok = load()
+        print(f"generating ({label})...")
+        rows = run_model(
+            model, tok, engine, boards,
+            include_board=not args.no_board,
+            include_legal_moves=not args.no_legal_moves,
+            max_new_tokens=args.max_new_tokens,
+            batch_size=args.batch_size,
+            think=not args.no_think,
+        )
+        results.append(summarize(label, rows))
+
+    if args.out:
+        with open(args.out, "w") as f:
+            json.dump(results, f, indent=1)
+        print(f"\nwrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()
