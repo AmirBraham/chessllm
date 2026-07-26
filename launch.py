@@ -38,37 +38,40 @@ MIN_VRAM_GB = 24  # GRPO later needs policy + frozen reference + Adam states
 # .venv is excluded because macOS wheels are useless on the pod's Linux.
 NO_UPLOAD = [".git", ".venv", "__pycache__", ".env", "runs", ".ipynb_checkpoints"]
 
+# Deliberately not uv. `uv sync` reinstalls torch's whole dependency subtree --
+# ~2GB of nvidia-*-cu13 wheels -- even with --no-install-package torch, because
+# those are separate packages in the lock. Worse, they land ahead of the
+# image's driver-matched torch on sys.path. pip installing only what the image
+# lacks avoids the second CUDA stack entirely; transformers declares torch as
+# an extra, so nothing here drags one in.
+POD_PACKAGES = "chess transformers matplotlib pyarrow huggingface_hub tqdm"
+
 # Debian puts stockfish in /usr/games, which is not on root's PATH.
 SYSTEM_SETUP = f"""
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq && apt-get install -y -qq stockfish curl rsync
-command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+apt-get update -qq && apt-get install -y -qq stockfish rsync
 mkdir -p {WORKDIR}
 echo "--- system setup done ---"
 """
 
 PROJECT_SETUP = f"""
 set -euo pipefail
-export PATH="$HOME/.local/bin:/usr/games:$PATH"
-# Reuse the image's torch instead of downloading our own: --system-site-packages
-# lets the venv see it, --no-install-package skips it, --inexact leaves it
-# alone rather than pruning it as unmanaged. Saves a ~2.5GB CUDA wheel per run,
-# and the image's build is matched to the host driver.
-# Not -q: silent output here is indistinguishable from a hang.
+export PATH="/usr/games:$PATH"
 cd {WORKDIR}
-uv venv --system-site-packages
-uv sync --inexact --no-install-package torch
+
+python -m pip install --no-cache-dir -q {POD_PACKAGES} \
+  || python -m pip install --no-cache-dir -q --break-system-packages {POD_PACKAGES}
 
 # Hard gate. torch falls back to CPU silently when its CUDA build is newer
-# than the host driver -- a pip-pulled cu13x wheel on a 570.x driver (CUDA
-# 12.8) reports cuda.is_available() == False and everything still "works",
-# just 50x slower on a GPU you are paying for.
-uv run --no-sync python - <<'PY'
+# than the host driver -- a cu13 wheel on a 570.x driver (CUDA 12.8) reports
+# cuda.is_available() == False and everything still "works", just far slower
+# on a GPU you are paying for.
+python - <<'PY'
 import sys, torch
 print(f"torch {{torch.__version__}}  cuda_available={{torch.cuda.is_available()}}")
 if not torch.cuda.is_available():
-    print(f"built for CUDA {{torch.version.cuda}}, but this host's driver does not support it")
+    print(f"built for CUDA {{torch.version.cuda}}; this host's driver is too old")
     sys.exit(1)
 print(f"device: {{torch.cuda.get_device_name(0)}}")
 PY
@@ -225,6 +228,11 @@ def ssh_args(port, key=None):
         "-o", "UserKnownHostsFile=/dev/null",
         "-o", "LogLevel=ERROR",
         "-o", "BatchMode=yes",
+        # Without keepalives a long silent step -- a big download, or minutes
+        # of generation with no output -- lets the connection die, and ssh
+        # exits 255 with the pod mid-task.
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=20",
     ]
     if key:
         args += ["-i", key]
@@ -343,12 +351,9 @@ def main():
         print(f"\n--- running: {args.command} ---\n")
         ssh(
             ip, port,
-            f'export PATH="$HOME/.local/bin:/usr/games:$PATH"\n'
+            f'export PATH="/usr/games:$PATH"\n'
             f"cd {WORKDIR}\n"
-            # --no-sync: a plain `uv run` re-syncs first and would reinstall
-            # the torch we deliberately skipped, pulling the cu13 wheel back
-            # in and putting us on CPU again.
-            f"uv run --no-sync {args.command}\n",
+            f"{args.command}\n",
             key=identity,
             check=False,
         )
