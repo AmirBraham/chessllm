@@ -21,9 +21,15 @@ import time
 
 import runpod
 from dotenv import load_dotenv
+from runpod.error import QueryError
 
 IMAGE = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
 WORKDIR = "/workspace/chessllm"
+# Preference order, passphrase-less automation key first. A key with a
+# passphrase cannot be used unattended: ssh silently skips it, falls back to
+# password auth, and reports "Permission denied (publickey,password)" -- which
+# looks identical to the key never having been registered.
+SSH_KEYS = ("runpod_automation", "id_ed25519", "id_rsa")
 MIN_VRAM_GB = 24  # GRPO later needs policy + frozen reference + Adam states
 
 # The working tree is uploaded as-is rather than cloned, so a run always
@@ -90,16 +96,74 @@ def priced_gpus(min_vram):
     return sorted(priced, key=lambda p: p[0])
 
 
-def pick_gpu(min_vram):
-    priced = priced_gpus(min_vram)
-    if not priced:
-        raise SystemExit(
-            f"no GPU with >= {min_vram} GB is currently available. "
-            "Try --min-vram 16, or --list-gpus to see what there is."
-        )
-    price, gpu = priced[0]
-    print(f"picked {gpu['displayName']}  {gpu['memoryInGb']}GB  ${price:.2f}/hr")
-    return gpu
+def has_passphrase(private_key):
+    """True if the key cannot be read without a passphrase."""
+    return subprocess.run(
+        ["ssh-keygen", "-y", "-P", "", "-f", private_key],
+        capture_output=True,
+    ).returncode != 0
+
+
+def ssh_identity(explicit=None):
+    """(private_key_path, public_key_text) for an unattended connection.
+
+    Pods created through the web UI get the account's registered keys injected
+    automatically. Pods created through the API do not -- the key must be
+    handed over as PUBLIC_KEY, which the image's start script writes to
+    authorized_keys before starting sshd.
+    """
+    names = [explicit] if explicit else [f"~/.ssh/{n}" for n in SSH_KEYS]
+
+    for name in names:
+        private = os.path.expanduser(name)
+        public = f"{private}.pub"
+        if not (os.path.exists(private) and os.path.exists(public)):
+            continue
+        if has_passphrase(private):
+            print(f"  skipping {os.path.basename(private)}: passphrase-protected")
+            continue
+        with open(public) as f:
+            return private, f.read().strip()
+
+    raise SystemExit(
+        "no passphrase-less SSH key found. Automation needs one:\n"
+        "  ssh-keygen -t ed25519 -N '' -f ~/.ssh/runpod_automation"
+    )
+
+
+def create_pod(args, candidates, pubkey):
+    """Create a pod on the first candidate GPU with actual capacity.
+
+    A GPU type being listed does not mean one is free: capacity can vanish
+    between pricing it and asking for it, and RunPod answers with "no longer
+    any instances available". Walking down the price-sorted list turns that
+    from a dead end into a few cents per hour.
+    """
+    for price, gpu in candidates:
+        label = f"{gpu['displayName']}  {gpu['memoryInGb']}GB  ${price:.2f}/hr"
+        try:
+            pod = runpod.create_pod(
+                name="chessllm",
+                image_name=args.image,
+                gpu_type_id=gpu["id"],
+                cloud_type=args.cloud,
+                container_disk_in_gb=args.disk,
+                support_public_ip=True,
+                start_ssh=True,
+                ports="22/tcp",
+                env={"PUBLIC_KEY": pubkey},
+            )
+            print(f"got {label}")
+            return pod
+        except QueryError as exc:
+            if "no longer any instances" not in str(exc):
+                raise
+            print(f"  {label} -- no capacity, trying next")
+
+    raise SystemExit(
+        "no GPU with capacity right now. Try --cloud COMMUNITY, "
+        "--min-vram 16, or wait a few minutes."
+    )
 
 
 def wait_for_ssh(pod_id, timeout=600):
@@ -116,45 +180,57 @@ def wait_for_ssh(pod_id, timeout=600):
     raise SystemExit("pod never exposed SSH within timeout")
 
 
-def ssh(ip, port, script, check=True):
+def ssh(ip, port, script, key=None, check=True):
     """Run a bash script on the pod, streaming output to this terminal."""
     return subprocess.run(
-        [
-            "ssh", "-p", str(port), f"root@{ip}",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR",
-            "bash -s",
-        ],
+        ["ssh", *ssh_args(port, key), f"root@{ip}", "bash -s"],
         input=script,
         text=True,
         check=check,
     )
 
 
-def ssh_opts(port):
-    return (
-        f"ssh -p {port} -o StrictHostKeyChecking=no "
-        "-o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
-    )
+def ssh_args(port, key=None):
+    """Common ssh options.
+
+    BatchMode=yes matters: without it, an unregistered SSH key makes ssh fall
+    back to a password prompt that no one can answer, and the script hangs
+    while the pod bills. With it, ssh fails immediately and the finally block
+    tears the pod down.
+    """
+    args = [
+        "-p", str(port),
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "LogLevel=ERROR",
+        "-o", "BatchMode=yes",
+    ]
+    if key:
+        args += ["-i", key]
+    return args
 
 
-def upload(ip, port):
+def ssh_opts(port, key=None):
+    """The same options as one string, for `rsync -e`."""
+    return "ssh " + " ".join(ssh_args(port, key))
+
+
+def upload(ip, port, key=None):
     """Push the local working tree to the pod."""
     excludes = [arg for name in NO_UPLOAD for arg in ("--exclude", name)]
     subprocess.run(
-        ["rsync", "-az", "--delete", "-e", ssh_opts(port), *excludes,
+        ["rsync", "-az", "--delete", "-e", ssh_opts(port, key), *excludes,
          "./", f"root@{ip}:{WORKDIR}/"],
         check=True,
     )
     print("working tree uploaded")
 
 
-def fetch_results(ip, port):
+def fetch_results(ip, port, key=None):
     """Copy the pod's runs/ directory back into ./runs."""
     os.makedirs("runs", exist_ok=True)
     result = subprocess.run(
-        ["rsync", "-az", "-e", ssh_opts(port),
+        ["rsync", "-az", "-e", ssh_opts(port, key),
          f"root@{ip}:{WORKDIR}/runs/", "runs/"],
         check=False,
     )
@@ -186,6 +262,8 @@ def main():
     parser.add_argument("--image", default=IMAGE)
     parser.add_argument("--disk", type=int, default=40, help="container disk GB")
     parser.add_argument("--cloud", default="ALL", choices=["ALL", "COMMUNITY", "SECURE"])
+    parser.add_argument("--ssh-key", default=None,
+                        help="private key to use (default: ssh picks it)")
     parser.add_argument("--keep", action="store_true",
                         help="leave the pod running (you must terminate it yourself)")
     args = parser.parse_args()
@@ -204,28 +282,39 @@ def main():
     if not args.command:
         raise SystemExit("give a command to run, or pass --list-gpus")
 
-    gpu_id = args.gpu or pick_gpu(args.min_vram)["id"]
+    if args.gpu:
+        candidates = [(0.0, runpod.get_gpu(args.gpu))]
+    else:
+        candidates = priced_gpus(args.min_vram)
+        if not candidates:
+            raise SystemExit(
+                f"no GPU with >= {args.min_vram} GB listed. "
+                "Try --min-vram 16, or --list-gpus."
+            )
 
-    pod = runpod.create_pod(
-        name="chessllm",
-        image_name=args.image,
-        gpu_type_id=gpu_id,
-        cloud_type=args.cloud,
-        container_disk_in_gb=args.disk,
-        support_public_ip=True,
-        start_ssh=True,
-        ports="22/tcp",
-    )
+    identity, pubkey = ssh_identity(args.ssh_key)
+    print(f"ssh key: {os.path.basename(identity)}")
+
+    pod = create_pod(args, candidates, pubkey)
     pod_id = pod["id"]
     print(f"pod {pod_id} created")
 
     try:
         ip, port = wait_for_ssh(pod_id)
-        print(f"ssh root@{ip} -p {port}\n")
+        print(f"ssh -i {identity} root@{ip} -p {port}\n")
 
-        ssh(ip, port, SYSTEM_SETUP)
-        upload(ip, port)
-        ssh(ip, port, PROJECT_SETUP)
+        try:
+            ssh(ip, port, SYSTEM_SETUP, identity)
+        except subprocess.CalledProcessError:
+            raise SystemExit(
+                f"\nssh refused the key {os.path.basename(identity)}. The pod "
+                "installs whatever PUBLIC_KEY it was created with, so this "
+                "means the public half did not match, or sshd was not ready "
+                "yet. Retry, or pass --ssh-key to choose a different key."
+            )
+
+        upload(ip, port, identity)
+        ssh(ip, port, PROJECT_SETUP, identity)
 
         print(f"\n--- running: {args.command} ---\n")
         ssh(
@@ -233,10 +322,11 @@ def main():
             f'export PATH="$HOME/.local/bin:/usr/games:$PATH"\n'
             f"cd {WORKDIR}\n"
             f"uv run {args.command}\n",
+            key=identity,
             check=False,
         )
 
-        fetch_results(ip, port)
+        fetch_results(ip, port, identity)
     finally:
         report_cost(pod_id)
         if args.keep:
