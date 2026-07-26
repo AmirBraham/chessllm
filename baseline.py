@@ -49,27 +49,26 @@ def run_stockfish(engine, boards):
 
 def run_model(model, tok, engine, boards, include_board, include_legal_moves,
               max_new_tokens, batch_size, think):
+    prompts = [
+        build_prompt(b, include_board, include_legal_moves) for b in boards
+    ]
+    texts, lengths = generate(
+        model, tok, prompts,
+        max_new_tokens=max_new_tokens, think=think, batch_size=batch_size,
+    )
+
     rows = []
-    for start in range(0, len(boards), batch_size):
-        chunk = boards[start:start + batch_size]
-        prompts = [
-            build_prompt(b, include_board, include_legal_moves) for b in chunk
-        ]
-        texts, lengths = generate(
-            model, tok, prompts, max_new_tokens=max_new_tokens, think=think
-        )
+    for board, text, length in zip(boards, texts, lengths):
+        move, raw = parse_move(board, text)
+        row = score(engine, board, move)
+        # "answered" means it committed to something inside \boxed{}. A
+        # completion that ran out of budget mid-reasoning has no answer, so it
+        # contributes to no cp_loss average.
+        row["answered"] = raw is not None
+        row["tokens"] = length
+        row["truncated"] = length >= max_new_tokens
+        rows.append(row)
 
-        for board, text, length in zip(chunk, texts, lengths):
-            move, raw = parse_move(board, text)
-            row = score(engine, board, move)
-            row["parsed"] = raw is not None
-            row["tokens"] = length
-            # Used the whole budget, so it never reached an answer. Any move
-            # parsed out of it was scraped from mid-reasoning, not chosen.
-            row["truncated"] = length >= max_new_tokens
-            rows.append(row)
-
-        print(f"  {min(start + batch_size, len(boards))}/{len(boards)}")
     return rows
 
 
@@ -86,9 +85,9 @@ def summarize(name, rows):
         print(f"  median cp_loss   {st.median(losses):6.0f}")
         print(f"  good moves <={GOOD_MOVE_CP}cp  {good:6.1%}")
 
-    if "parsed" in rows[0]:
+    if "answered" in rows[0]:
         rate = lambda k: sum(1 for r in rows if r[k]) / n  # noqa: E731
-        print(f"  parse rate       {rate('parsed'):6.1%}")
+        print(f"  answered         {rate('answered'):6.1%}")
         print(f"  legal rate       {rate('legal'):6.1%}")
         print(f"  truncated        {rate('truncated'):6.1%}")
         print(f"  mean tokens      {st.mean(r['tokens'] for r in rows):6.0f}")

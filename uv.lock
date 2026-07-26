@@ -243,6 +243,7 @@ dependencies = [
     { name = "pyarrow" },
     { name = "requests" },
     { name = "torch" },
+    { name = "tqdm" },
     { name = "transformers" },
 ]
 
@@ -257,6 +258,7 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=25.0.0" },
     { name = "requests", specifier = ">=2.34.2" },
     { name = "torch", specifier = ">=2.13.0" },
+    { name = "tqdm", specifier = ">=4.69.1" },
     { name = "transformers", specifier = ">=5.14.1" },
 ]
 

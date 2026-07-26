@@ -44,37 +44,98 @@ def build_prompt(board, include_board=True, include_legal_moves=True):
     parts.append(context)
 
     parts.append(
-        "Think briefly, then write the move on the last line "
-        "in standard algebraic notation (SAN)."
+        "Think briefly, then give your move in standard algebraic notation "
+        r"(SAN) as: \boxed{MOVE}"
     )
     return "\n".join(parts)
 
 
-def parse_move(board, completion):
-    """Extract the move the completion settles on, scanning after </think>.
+def extract_boxed(text):
+    r"""Contents of the last \boxed{...}, or None.
 
-    Returns (Move, raw) if legal, (None, raw) if illegal, (None, None) if no
-    move-shaped text at all -- the reward function scores those differently.
+    Ported from the book's `get_last_boxed` (ch03). Counts brace depth rather
+    than matching the first "}", so nested braces survive. Unbalanced braces
+    return None -- that means the completion was cut off mid-answer, which is
+    not an answer.
     """
+    start = text.rfind(r"\boxed")
+    if start == -1:
+        return None
+
+    i = start + len(r"\boxed")
+    while i < len(text) and text[i].isspace():
+        i += 1
+    if i >= len(text) or text[i] != "{":
+        return None
+
+    i += 1
+    depth, content_start = 1, i
+    while i < len(text) and depth > 0:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+        i += 1
+
+    if depth != 0:
+        return None
+    return text[content_start:i - 1].strip()
+
+
+def _to_move(board, raw):
+    """SAN or UCI string -> legal Move, or None."""
+    try:
+        return board.parse_san(raw)
+    except ValueError:
+        pass
+    try:
+        move = chess.Move.from_uci(raw)
+    except ValueError:
+        return None
+    return move if move in board.legal_moves else None
+
+
+def parse_move(board, completion, strict=True):
+    r"""Extract the move the completion commits to.
+
+    Returns (Move, raw) if legal, (None, raw) if a move was named but illegal,
+    (None, None) if nothing was named -- three outcomes the reward scores
+    differently.
+
+    strict=True reads only \boxed{...}. This matters: without it, a completion
+    that rambles past its token budget still yields a move, because the scan
+    picks up any move-shaped token in the prose. Rewarding that during GRPO
+    would teach the model to produce text that games the parser rather than
+    good chess.
+
+    strict=False keeps the old prose scan, for measuring how much of a
+    reported legal rate was parser artifact.
+    """
+    boxed = extract_boxed(completion)
+    if boxed is not None:
+        move = _to_move(board, boxed)
+        if move is not None:
+            return move, boxed
+        # Answered, but wrapped: "**Ng5**", "Ng5 is best", ...
+        for raw in SAN_TOKEN.findall(boxed) + UCI_TOKEN.findall(boxed):
+            move = _to_move(board, raw)
+            if move is not None:
+                return move, raw
+        return None, boxed
+
+    if strict:
+        return None, None
+
     tail = completion.rsplit("</think>", 1)[-1]
     if not tail.strip():
         tail = completion
 
     fallback = None
     for line in reversed([ln for ln in tail.splitlines() if ln.strip()]):
-        for raw in reversed(SAN_TOKEN.findall(line)):
+        for raw in SAN_TOKEN.findall(line) + UCI_TOKEN.findall(line):
             fallback = fallback or raw
-            try:
-                return board.parse_san(raw), raw
-            except ValueError:
-                pass
-        for raw in reversed(UCI_TOKEN.findall(line)):
-            fallback = fallback or raw
-            try:
-                move = chess.Move.from_uci(raw)
-            except ValueError:
-                continue
-            if move in board.legal_moves:
+            move = _to_move(board, raw)
+            if move is not None:
                 return move, raw
 
     return None, fallback

@@ -5,6 +5,7 @@ GRPO rollout, and running prompts one at a time leaves the GPU mostly idle.
 """
 
 import torch
+from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 MODEL_ID = "Qwen/Qwen3-0.6B"  # post-trained ("thinking") model, not -Base
@@ -35,36 +36,46 @@ def load(model_id=MODEL_ID, device=None):
     return model, tok
 
 
-def generate(model, tok, prompts, max_new_tokens=512, think=True, temperature=None):
+def generate(model, tok, prompts, max_new_tokens=512, think=True,
+             temperature=None, batch_size=16, progress=True):
     """Generate one completion per prompt. Greedy unless `temperature` is set.
+
+    Prompts run in batches of `batch_size`: one oversized batch runs out of
+    memory, one prompt at a time leaves the GPU idle.
 
     Returns (texts, lengths). `lengths` is the number of tokens generated,
     which is how the caller detects truncation: a completion that used the
-    entire budget never reached its answer, and any move parsed out of it is
-    scraped from mid-reasoning rather than chosen.
+    entire budget never reached its answer, so it has no answer to score.
     """
-    chats = [
-        tok.apply_chat_template(
-            [{"role": "user", "content": prompt}],
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=think,
-        )
-        for prompt in prompts
-    ]
+    texts, lengths = [], []
+    starts = range(0, len(prompts), batch_size)
 
-    batch = tok(chats, return_tensors="pt", padding=True).to(model.device)
-    prompt_len = batch["input_ids"].shape[1]
+    for start in tqdm(starts, unit="batch", disable=not progress):
+        chunk = prompts[start:start + batch_size]
+        chats = [
+            tok.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=think,
+            )
+            for prompt in chunk
+        ]
 
-    with torch.no_grad():
-        out = model.generate(
-            **batch,
-            max_new_tokens=max_new_tokens,
-            do_sample=temperature is not None,
-            temperature=temperature,
-            pad_token_id=tok.pad_token_id,
-        )
+        batch = tok(chats, return_tensors="pt", padding=True).to(model.device)
+        prompt_len = batch["input_ids"].shape[1]
 
-    new = out[:, prompt_len:]
-    lengths = [int((row != tok.pad_token_id).sum()) for row in new]
-    return tok.batch_decode(new, skip_special_tokens=True), lengths
+        with torch.no_grad():
+            out = model.generate(
+                **batch,
+                max_new_tokens=max_new_tokens,
+                do_sample=temperature is not None,
+                temperature=temperature,
+                pad_token_id=tok.pad_token_id,
+            )
+
+        new = out[:, prompt_len:]
+        texts.extend(tok.batch_decode(new, skip_special_tokens=True))
+        lengths.extend(int((row != tok.pad_token_id).sum()) for row in new)
+
+    return texts, lengths
