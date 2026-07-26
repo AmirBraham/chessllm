@@ -27,25 +27,39 @@ def legal_moves_san(board):
     return sorted(board.san(m) for m in board.legal_moves)
 
 
-def build_prompt(board, include_board=True, include_legal_moves=True):
-    """Build the model prompt. The two flags define the 2x2 baseline grid."""
+def format_history(moves_san):
+    """Moves as PGN movetext: '1. e4 e5 2. Nf3 Nc6 ...'"""
+    out = []
+    for i, san in enumerate(moves_san):
+        if i % 2 == 0:
+            out.append(f"{i // 2 + 1}.")
+        out.append(san)
+    return " ".join(out)
+
+
+def build_prompt(board, moves_san, include_legal_moves=True):
+    r"""Build the model prompt from the game's move history.
+
+    The position is given as movetext, not as a FEN or a diagram. Both of
+    those were tried and failed: a 0.6B model decodes `2b2rk1` as "two kings,
+    two rooks, and a bishop" and burns its whole token budget doing it, while
+    ignoring an ASCII grid printed directly below. Movetext is the one board
+    encoding it saw at scale during pretraining, so whatever chess knowledge
+    it has should be reachable this way.
+    """
     side = "White" if board.turn == chess.WHITE else "Black"
 
     parts = [
         "You are a chess engine. Choose the best move.\n",
-        f"FEN: {board.fen()}\n",
+        f"Game so far:\n{format_history(moves_san)}\n",
+        f"{side} to move.",
     ]
-    if include_board:
-        parts.append(f"{ascii_board(board)}\n")
-
-    context = f"{side} to move.\n"
     if include_legal_moves:
-        context += f"Legal moves: {' '.join(legal_moves_san(board))}\n"
-    parts.append(context)
+        parts.append(f"Legal moves: {' '.join(legal_moves_san(board))}")
 
     parts.append(
-        "Think briefly, then give your move in standard algebraic notation "
-        r"(SAN) as: \boxed{MOVE}"
+        "Give your move in standard algebraic notation (SAN) as: "
+        r"\boxed{MOVE}"
     )
     return "\n".join(parts)
 

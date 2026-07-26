@@ -1,1 +1,12 @@
+# secrets -- RUNPOD_API_KEY lives here
+.env
+
 /__pycache__
+*.py[cod]
+.DS_Store
+.ipynb_checkpoints/
+
+# model weights and run outputs (large, reproducible)
+qwen3/
+*.pth
+runs/

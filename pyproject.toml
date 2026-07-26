@@ -7,7 +7,9 @@ requires-python = ">=3.11"
 dependencies = [
     "chess>=1.11.2",
     "pyarrow>=25.0.0",
+    "python-dotenv>=1.2.2",
     "requests>=2.34.2",
+    "runpod>=1.11.0",
     "torch>=2.13.0",
     "tqdm>=4.69.1",
     "transformers>=5.14.1",

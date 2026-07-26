@@ -112,6 +112,10 @@ def build(n, out, seed=0):
             records.append(
                 {
                     "fen": board.fen(),
+                    # The prompt is built from movetext, not the FEN. The FEN
+                    # is kept so a position can be reconstructed in one step
+                    # without replaying the game.
+                    "moves": moves_san[:ply],
                     "spread_cp": spread,
                     "n_legal": n_legal,
                     "ply": ply,
