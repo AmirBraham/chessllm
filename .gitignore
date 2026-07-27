@@ -10,3 +10,4 @@
 qwen3/
 *.pth
 runs/
+runs/figures/

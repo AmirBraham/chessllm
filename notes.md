@@ -100,6 +100,33 @@ board. They have movement offsets. None of them has edges.
 
 ---
 
+### An important caveat on all of the above
+
+Every one of those runs had **thinking disabled**. The models are the
+post-trained thinking-capable ones, but `probe.py` defaults `--think` to off and
+I inherited that from the chess baseline, where thinking truncated 100% of the
+time.
+
+So the honest claim is narrower than it looked. These numbers say what the
+models do **answering directly**, not what they can do when allowed to reason.
+Worth checking, since 4B was already doing coordinate arithmetic without a
+scratchpad. Currently rerunning at n=100 with both modes.
+
+Nothing in the older output files records which mode produced them, which is
+how you end up comparing runs that aren't comparable. `probe.py` now writes
+model, think and budget into every item.
+
+---
+
+## Tooling
+
+`report.py` renders every figure from `runs/` into `runs/figures/` and prints a
+summary. `probe.ipynb` imports the same functions, so the notebook and the
+script can't drift. Use the script for PNGs, the notebook for poking at
+individual answers.
+
+---
+
 ## Gotchas worth remembering
 
 Always report truncation next to a score. At 256 tokens 1.7B scored 12%. At 1024
