@@ -29,7 +29,7 @@ from pathlib import Path
 
 import chess
 
-from qwen3 import generate, load
+from qwen3 import MODEL_ID, generate, load
 
 SQUARE = re.compile(r"\b[a-h][1-8]\b")
 PIECE_NAMES = {
@@ -137,6 +137,8 @@ def main():
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--think", action="store_true",
                         help="enable thinking (off by default: it never terminated)")
+    parser.add_argument("--model", default=MODEL_ID,
+                        help="HF model id, e.g. Qwen/Qwen3-4B")
     args = parser.parse_args()
 
     rng = random.Random(args.seed)
@@ -146,7 +148,8 @@ def main():
     items = moves_probe(args.n, rng) + board_probe(records, args.n, rng)
     print(f"{len(items)} probes")
 
-    model, tok = load()
+    print(f"model: {args.model}")
+    model, tok = load(args.model)
     texts, _ = generate(
         model, tok, [i["prompt"] for i in items],
         max_new_tokens=args.max_new_tokens, think=args.think,

@@ -44,7 +44,7 @@ NO_UPLOAD = [".git", ".venv", "__pycache__", ".env", "runs", ".ipynb_checkpoints
 # image's driver-matched torch on sys.path. pip installing only what the image
 # lacks avoids the second CUDA stack entirely; transformers declares torch as
 # an extra, so nothing here drags one in.
-POD_PACKAGES = "chess transformers matplotlib pyarrow huggingface_hub tqdm"
+POD_PACKAGES = "chess transformers pyarrow huggingface_hub tqdm"
 
 # Debian puts stockfish in /usr/games, which is not on root's PATH.
 SYSTEM_SETUP = f"""

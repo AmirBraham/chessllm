@@ -26,7 +26,7 @@ import chess
 
 from board import build_prompt, parse_move
 from engine import Engine
-from qwen3 import generate, load
+from qwen3 import MODEL_ID, generate, load
 
 GOOD_MOVE_CP = 50  # "reasonable move" threshold
 
@@ -118,6 +118,8 @@ def main():
                         help="disable Qwen3 thinking mode (much shorter, cheaper)")
     parser.add_argument("--no-legal-moves", action="store_true",
                         help="drop the legal-move list from the prompt")
+    parser.add_argument("--model", default=MODEL_ID,
+                        help="HF model id, e.g. Qwen/Qwen3-4B")
     parser.add_argument("--skip-refs", action="store_true",
                         help="skip the random and Stockfish reference rows")
     args = parser.parse_args()
@@ -145,11 +147,11 @@ def main():
             results.append(summarize("stockfish best", run_stockfish(engine, boards)))
 
         label = (
-            f"qwen3-0.6B legal={not args.no_legal_moves} "
-            f"think={not args.no_think}"
+            f"{args.model.split('/')[-1]} "
+            f"legal={not args.no_legal_moves} think={not args.no_think}"
         )
         print("\nloading model...")
-        model, tok = load()
+        model, tok = load(args.model)
         print(f"generating ({label})...")
         rows = run_model(
             model, tok, engine, boards, histories,
@@ -165,13 +167,10 @@ def main():
         out.parent.mkdir(parents=True, exist_ok=True)
         with out.open("w") as f:
             json.dump(results, f, indent=1)
+        # No plotting here on purpose: the pod produces data, charts are made
+        # locally in probe.ipynb. Keeps matplotlib off the pod and keeps GPU
+        # time spent on generation.
         print(f"\nwrote {out}")
-
-        try:
-            from plot import plot_results
-            print(f"wrote {plot_results(out)}")
-        except ImportError as exc:
-            print(f"(no charts: {exc})")
 
 
 if __name__ == "__main__":
