@@ -179,6 +179,12 @@ def main():
     )
 
     for item, text, length in zip(items, texts, lengths):
+        # Recorded per item so a results file is self-describing. Comparing a
+        # think=True run against a think=False one is meaningless, and without
+        # this there is no way to tell them apart after the fact.
+        item["model"] = args.model
+        item["think"] = args.think
+        item["budget"] = args.max_new_tokens
         item["said"] = boxed(text).strip()
         item["score"] = grade(item, text)
         item["completion"] = text
