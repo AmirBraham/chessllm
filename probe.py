@@ -134,7 +134,10 @@ def main():
     parser.add_argument("--out", default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--max-new-tokens", type=int, default=256)
+    # 1024, not 256: Qwen3 writes markdown reasoning even with thinking off,
+    # and at 256 several answers were cut mid-sentence -- which scores as
+    # ignorance. Truncation is reported so this stays visible.
+    parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--think", action="store_true",
                         help="enable thinking (off by default: it never terminated)")
     parser.add_argument("--model", default=MODEL_ID,
@@ -150,22 +153,30 @@ def main():
 
     print(f"model: {args.model}")
     model, tok = load(args.model)
-    texts, _ = generate(
+    texts, lengths = generate(
         model, tok, [i["prompt"] for i in items],
         max_new_tokens=args.max_new_tokens, think=args.think,
         batch_size=args.batch_size,
     )
 
-    for item, text in zip(items, texts):
+    for item, text, length in zip(items, texts, lengths):
         item["said"] = boxed(text).strip()
         item["score"] = grade(item, text)
+        item["completion"] = text
+        item["tokens"] = length
+        # Without this, "did not know" and "ran out of budget" are the same
+        # number -- and a bigger model that reasons more looks *worse*.
+        item["truncated"] = length >= args.max_new_tokens
 
     for kind in ("moves", "board"):
         scored = [i for i in items if i["kind"] == kind]
         if scored:
             correct = sum(i["score"] for i in scored)
+            cut = sum(i["truncated"] for i in scored)
             print(f"\n{kind}: {correct:.0f}/{len(scored)} = "
-                  f"{correct / len(scored):.0%}")
+                  f"{correct / len(scored):.0%}   "
+                  f"truncated {cut}/{len(scored)}   "
+                  f"mean {sum(i['tokens'] for i in scored) / len(scored):.0f} tokens")
             for item in scored[:4]:
                 print(f"   want {str(item['answer'])[:48]:50s} got {item['said'][:40]!r}")
 
