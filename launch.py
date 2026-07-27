@@ -220,18 +220,44 @@ def create_pod(args, candidates, pubkey):
     )
 
 
-def wait_for_ssh(pod_id, timeout=600):
-    """Poll until the pod exposes a public SSH port. Returns (ip, port)."""
+def wait_for_ssh(pod_id, key, timeout=600):
+    """Block until the pod actually accepts an ssh connection.
+
+    Two separate waits. RunPod reports the port as public well before the
+    container's sshd is listening, so connecting on that signal alone gets
+    "Connection reset by peer" -- which looks like an auth failure but is just
+    impatience. The second loop probes until a trivial command succeeds.
+    """
     deadline = time.time() + timeout
+    address = None
+
     while time.time() < deadline:
         pod = runpod.get_pod(pod_id)
         runtime = (pod or {}).get("runtime") or {}
         for port in runtime.get("ports") or []:
             if port.get("privatePort") == 22 and port.get("isIpPublic"):
-                return port["ip"], int(port["publicPort"])
+                address = port["ip"], int(port["publicPort"])
+                break
+        if address:
+            break
         print("  waiting for pod...")
         time.sleep(10)
-    raise SystemExit("pod never exposed SSH within timeout")
+
+    if not address:
+        raise SystemExit("pod never exposed SSH within timeout")
+
+    ip, port = address
+    while time.time() < deadline:
+        probe = subprocess.run(
+            ["ssh", *ssh_args(port, key), f"root@{ip}", "true"],
+            capture_output=True, text=True,
+        )
+        if probe.returncode == 0:
+            return ip, port
+        print("  waiting for sshd...")
+        time.sleep(5)
+
+    raise SystemExit(f"sshd never accepted a connection: {probe.stderr.strip()}")
 
 
 def ssh(ip, port, script, key=None, check=True):
@@ -362,19 +388,10 @@ def main():
     print(f"pod {pod_id} created")
 
     try:
-        ip, port = wait_for_ssh(pod_id)
+        ip, port = wait_for_ssh(pod_id, identity)
         print(f"ssh -i {identity} root@{ip} -p {port}\n")
 
-        try:
-            ssh(ip, port, SYSTEM_SETUP, identity)
-        except subprocess.CalledProcessError:
-            raise SystemExit(
-                f"\nssh refused the key {os.path.basename(identity)}. The pod "
-                "installs whatever PUBLIC_KEY it was created with, so this "
-                "means the public half did not match, or sshd was not ready "
-                "yet. Retry, or pass --ssh-key to choose a different key."
-            )
-
+        ssh(ip, port, SYSTEM_SETUP, identity)
         upload(ip, port, identity)
         ssh(ip, port, PROJECT_SETUP, identity)
 
