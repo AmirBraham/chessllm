@@ -60,10 +60,15 @@ def boxed(text):
 
 
 def moves_probe(n, rng):
-    """Where can a lone piece move on an empty board?"""
+    """Where can a lone piece move on an empty board?
+
+    Pieces are cycled rather than sampled, so each gets n/5 questions. Drawing
+    at random left 6 knights and 2 bishops in a 25-item run, which makes any
+    per-piece breakdown meaningless.
+    """
     items = []
-    for _ in range(n):
-        piece = rng.choice(PROBE_PIECES)
+    for index in range(n):
+        piece = PROBE_PIECES[index % len(PROBE_PIECES)]
         square = rng.randrange(64)
         name = PIECE_NAMES[piece]
 
@@ -85,18 +90,24 @@ def moves_probe(n, rng):
 
 
 def board_probe(records, n, rng):
-    """After this movetext, what sits on a given square?"""
+    """After this movetext, what sits on a given square?
+
+    Exactly half the squares are empty, alternating. A coin flip per item made
+    the always-answer-"empty" baseline drift with the sample: it came out
+    40% in one 25-item run, so a model scoring 40% looked like it was tracking
+    when it was answering "empty" to everything.
+    """
     items = []
-    for record in rng.sample(records, min(n, len(records))):
+    pool = records * (n // len(records) + 1)
+    for index, record in enumerate(rng.sample(pool, n) if n > len(records)
+                                   else rng.sample(records, n)):
         board = chess.Board()
         for san in record["moves"]:
             board.push_san(san)
 
-        # Half occupied, half empty, so "empty" is not always wrong or always
-        # right -- otherwise a model that always guesses one scores 50%.
         occupied = [s for s in chess.SQUARES if board.piece_at(s)]
         empty = [s for s in chess.SQUARES if not board.piece_at(s)]
-        square = rng.choice(occupied if rng.random() < 0.5 else empty)
+        square = rng.choice(empty if index % 2 else occupied)
 
         piece = board.piece_at(square)
         answer = (
