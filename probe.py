@@ -40,13 +40,21 @@ PROBE_PIECES = [chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING]
 
 
 def boxed(text):
-    """Contents of the last \\boxed{...}, else the last non-empty line."""
-    start = text.rfind(r"\boxed")
-    if start != -1:
-        opened = text.find("{", start)
-        closed = text.find("}", opened)
-        if opened != -1 and closed != -1:
-            return text[opened + 1:closed]
+    """Contents of the last \\boxed{...}, else the last non-empty line.
+
+    Uses board.extract_boxed, which counts brace depth. Stopping at the first
+    "}" turns the common \\boxed{\\text{empty}} into "\\text{empty" -- which
+    happens to grade right here, but is exactly the kind of sloppy parsing
+    that has already produced two rounds of fake results.
+    """
+    from board import extract_boxed
+
+    inner = extract_boxed(text)
+    if inner is not None:
+        # Strip one LaTeX wrapper, e.g. \text{empty} -> empty
+        match = re.fullmatch(r"\\[a-z]+\{(.*)\}", inner.strip(), re.S)
+        return match.group(1) if match else inner
+
     lines = [ln for ln in text.splitlines() if ln.strip()]
     return lines[-1] if lines else ""
 

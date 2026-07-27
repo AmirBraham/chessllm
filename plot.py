@@ -22,7 +22,13 @@ from pathlib import Path
 
 import matplotlib
 
-matplotlib.use("Agg")  # no display on a pod
+# Headless when run as a script, but not when imported into a notebook --
+# forcing Agg there silently swallows every figure.
+try:
+    get_ipython()  # type: ignore[name-defined] # noqa: F821
+except NameError:
+    matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt  # noqa: E402
 
 SURFACE = "#fcfcfb"
