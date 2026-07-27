@@ -109,7 +109,13 @@ def main():
     parser.add_argument("--positions", default="data/positions.json")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--out", default=None, help="write raw rows to JSON")
-    parser.add_argument("--batch-size", type=int, default=16)
+    # 48 not 16: 4B leaves ~15GB of a 24GB card free, and generation is
+    # bandwidth bound -- a bigger batch amortises the weight read across
+    # more sequences, which is the actual bottleneck.
+    parser.add_argument("--batch-size", type=int, default=48)
+    parser.add_argument("--backend", default="hf", choices=["hf", "vllm"],
+                        help="vllm uses continuous batching (much faster, "
+                             "but installs its own pinned torch)")
     # No local probe was possible, so this default is a guess. The truncation
     # rate in the output tells you whether it was big enough: if it is not
     # near zero, raise this or pass --no-think.
@@ -151,7 +157,7 @@ def main():
             f"legal={not args.no_legal_moves} think={not args.no_think}"
         )
         print("\nloading model...")
-        model, tok = load(args.model)
+        model, tok = load(args.model, backend=args.backend)
         print(f"generating ({label})...")
         rows = run_model(
             model, tok, engine, boards, histories,

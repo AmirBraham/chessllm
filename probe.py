@@ -152,7 +152,13 @@ def main():
     parser.add_argument("--positions", default="data/positions.json")
     parser.add_argument("--out", default=None)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--batch-size", type=int, default=16)
+    # 48 not 16: 4B leaves ~15GB of a 24GB card free, and generation is
+    # bandwidth bound -- a bigger batch amortises the weight read across
+    # more sequences, which is the actual bottleneck.
+    parser.add_argument("--batch-size", type=int, default=48)
+    parser.add_argument("--backend", default="hf", choices=["hf", "vllm"],
+                        help="vllm uses continuous batching (much faster, "
+                             "but installs its own pinned torch)")
     # 1024, not 256: Qwen3 writes markdown reasoning even with thinking off,
     # and at 256 several answers were cut mid-sentence -- which scores as
     # ignorance. Truncation is reported so this stays visible.
@@ -171,7 +177,7 @@ def main():
     print(f"{len(items)} probes")
 
     print(f"model: {args.model}")
-    model, tok = load(args.model)
+    model, tok = load(args.model, backend=args.backend)
     texts, lengths = generate(
         model, tok, [i["prompt"] for i in items],
         max_new_tokens=args.max_new_tokens, think=args.think,

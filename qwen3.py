@@ -19,7 +19,31 @@ def get_device():
     return "cpu"
 
 
-def load(model_id=MODEL_ID, device=None):
+def load_vllm(model_id, max_model_len=4096, gpu_fraction=0.90):
+    """vLLM backend: continuous batching, so a slow sequence stops holding up
+    the rest of the batch.
+
+    Opt-in because vLLM pins torch exactly (0.26 wants 2.11.0), which replaces
+    the image's driver-matched build. If the replacement is a cu13 wheel on a
+    driver that only speaks 12.x, torch falls back to CPU without erroring --
+    run gpucheck.py after installing it.
+    """
+    from vllm import LLM
+
+    tok = AutoTokenizer.from_pretrained(model_id)
+    llm = LLM(
+        model=model_id,
+        dtype="bfloat16",
+        gpu_memory_utilization=gpu_fraction,
+        max_model_len=max_model_len,
+    )
+    return llm, tok
+
+
+def load(model_id=MODEL_ID, device=None, backend="hf"):
+    if backend == "vllm":
+        return load_vllm(model_id)
+
     device = device or get_device()
 
     tok = AutoTokenizer.from_pretrained(model_id)
@@ -47,20 +71,39 @@ def generate(model, tok, prompts, max_new_tokens=512, think=True,
     which is how the caller detects truncation: a completion that used the
     entire budget never reached its answer, so it has no answer to score.
     """
+    def as_chat(prompt):
+        return tok.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=think,
+        )
+
+    # vLLM schedules its own batches, so batch_size is irrelevant there. Hand
+    # it everything at once and let continuous batching do the work: a
+    # sequence that finishes early frees its slot immediately instead of
+    # waiting for the slowest one in a fixed batch.
+    if type(model).__name__ == "LLM":
+        from vllm import SamplingParams
+
+        outputs = model.generate(
+            [as_chat(prompt) for prompt in prompts],
+            SamplingParams(
+                max_tokens=max_new_tokens,
+                temperature=0.0 if temperature is None else temperature,
+            ),
+        )
+        return (
+            [o.outputs[0].text for o in outputs],
+            [len(o.outputs[0].token_ids) for o in outputs],
+        )
+
     texts, lengths = [], []
     starts = range(0, len(prompts), batch_size)
 
     for start in tqdm(starts, unit="batch", disable=not progress):
         chunk = prompts[start:start + batch_size]
-        chats = [
-            tok.apply_chat_template(
-                [{"role": "user", "content": prompt}],
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=think,
-            )
-            for prompt in chunk
-        ]
+        chats = [as_chat(prompt) for prompt in chunk]
 
         batch = tok(chats, return_tensors="pt", padding=True).to(model.device)
         prompt_len = batch["input_ids"].shape[1]

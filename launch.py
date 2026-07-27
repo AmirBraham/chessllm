@@ -46,6 +46,13 @@ NO_UPLOAD = [".git", ".venv", "__pycache__", ".env", "runs", ".ipynb_checkpoints
 # an extra, so nothing here drags one in.
 POD_PACKAGES = "chess transformers pyarrow huggingface_hub tqdm"
 
+# Pinned deliberately. Every vLLM pins torch with == rather than >=, and this
+# is the newest one that pins 2.8.0 -- the version the image already ships.
+# Anything newer (0.11.1 wants 2.9, 0.26 wants 2.11) replaces the image's
+# driver-matched build with a fresh CUDA wheel, which is how we ended up
+# running on CPU once already.
+POD_VLLM = "vllm==0.11.0"
+
 # Debian puts stockfish in /usr/games, which is not on root's PATH.
 SYSTEM_SETUP = f"""
 set -eo pipefail
@@ -75,6 +82,7 @@ cd {WORKDIR}
 # image's driver-matched torch visible without reinstalling it.
 python3 -m venv --system-site-packages .venv
 python -m pip install -q --no-cache-dir {POD_PACKAGES}
+VLLM_INSTALL
 
 # Hard gate. torch falls back to CPU silently when its CUDA build is newer
 # than the host driver -- a cu13 wheel on a 570.x driver (CUDA 12.8) reports
@@ -349,6 +357,8 @@ def main():
     parser.add_argument("--image", default=IMAGE)
     parser.add_argument("--disk", type=int, default=40, help="container disk GB")
     parser.add_argument("--cloud", default="ALL", choices=["ALL", "COMMUNITY", "SECURE"])
+    parser.add_argument("--vllm", action="store_true",
+                        help="also install vLLM (pinned to the image's torch)")
     parser.add_argument("--cuda", nargs="+", default=["12.8", "12.9"],
                         help="acceptable host CUDA versions; filters out hosts "
                              "whose driver is too old for the image's torch")
@@ -418,7 +428,11 @@ def main():
 
         ssh(ip, port, SYSTEM_SETUP, identity)
         upload(ip, port, identity)
-        ssh(ip, port, PROJECT_SETUP, identity)
+        setup = PROJECT_SETUP.replace(
+            "VLLM_INSTALL",
+            f'python -m pip install -q --no-cache-dir "{POD_VLLM}"' if args.vllm else "",
+        )
+        ssh(ip, port, setup, identity)
 
         print(f"\n--- running: {args.command} ---\n")
         ssh(
