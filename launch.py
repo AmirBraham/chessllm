@@ -247,6 +247,7 @@ def wait_for_ssh(pod_id, key, timeout=600):
         raise SystemExit("pod never exposed SSH within timeout")
 
     ip, port = address
+    error = "timed out before the first probe"
     while time.time() < deadline:
         probe = subprocess.run(
             ["ssh", *ssh_args(port, key), f"root@{ip}", "true"],
@@ -254,10 +255,11 @@ def wait_for_ssh(pod_id, key, timeout=600):
         )
         if probe.returncode == 0:
             return ip, port
+        error = probe.stderr.strip()
         print("  waiting for sshd...")
         time.sleep(5)
 
-    raise SystemExit(f"sshd never accepted a connection: {probe.stderr.strip()}")
+    raise SystemExit(f"sshd never accepted a connection: {error}")
 
 
 def ssh(ip, port, script, key=None, check=True):
