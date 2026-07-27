@@ -354,8 +354,15 @@ def main():
                              "whose driver is too old for the image's torch")
     parser.add_argument("--ssh-key", default=None,
                         help="private key to use (default: ssh picks it)")
+    parser.add_argument("--pod", default=None,
+                        help="reuse a running pod instead of creating one "
+                             "(skips ~4min of boot, apt, pip and model download)")
     parser.add_argument("--keep", action="store_true",
-                        help="leave the pod running (you must terminate it yourself)")
+                        help="leave the pod running so --pod can reuse it")
+    parser.add_argument("--down", action="store_true",
+                        help="terminate afterwards even when reusing --pod")
+    parser.add_argument("--list-pods", action="store_true",
+                        help="show your running pods, then exit")
     args = parser.parse_args()
 
     load_dotenv()
@@ -369,25 +376,41 @@ def main():
             print(f"  {gpu['displayName']:32s} {gpu['memoryInGb']:3d}GB  ${price:.2f}/hr")
         return
 
+    if args.list_pods:
+        pods = runpod.get_pods() or []
+        for pod in pods:
+            gpu = (pod.get("machine") or {}).get("gpuDisplayName", "?")
+            print(f"  {pod['id']}  {pod.get('desiredStatus','?'):8s} {gpu:20s} "
+                  f"${pod.get('costPerHr', 0):.2f}/hr  {pod.get('name','')}")
+        if not pods:
+            print("  no pods running")
+        return
+
     if not args.command:
         raise SystemExit("give a command to run, or pass --list-gpus")
-
-    if args.gpu:
-        candidates = [(0.0, runpod.get_gpu(args.gpu))]
-    else:
-        candidates = priced_gpus(args.min_vram)
-        if not candidates:
-            raise SystemExit(
-                f"no GPU with >= {args.min_vram} GB listed. "
-                "Try --min-vram 16, or --list-gpus."
-            )
 
     identity, pubkey = ssh_identity(args.ssh_key)
     print(f"ssh key: {os.path.basename(identity)}")
 
-    pod = create_pod(args, candidates, pubkey)
-    pod_id = pod["id"]
-    print(f"pod {pod_id} created")
+    if args.pod:
+        pod_id = args.pod
+        print(f"reusing pod {pod_id}")
+    else:
+        if args.gpu:
+            candidates = [(0.0, runpod.get_gpu(args.gpu))]
+        else:
+            candidates = priced_gpus(args.min_vram)
+            if not candidates:
+                raise SystemExit(
+                    f"no GPU with >= {args.min_vram} GB listed. "
+                    "Try --min-vram 16, or --list-gpus."
+                )
+        pod_id = create_pod(args, candidates, pubkey)["id"]
+        print(f"pod {pod_id} created")
+
+    # Reusing implies keeping, unless told otherwise: terminating a pod the
+    # caller asked to reuse would defeat the point.
+    terminate = args.down or not (args.keep or args.pod)
 
     try:
         ip, port = wait_for_ssh(pod_id, identity)
@@ -410,14 +433,13 @@ def main():
         fetch_results(ip, port, identity)
     finally:
         report_cost(pod_id)
-        if args.keep:
-            print(f"\npod {pod_id} left running -- terminate with:")
-            print(f'  uv run python -c "import runpod,os;'
-                  f'runpod.api_key=os.environ[\'RUNPOD_API_KEY\'];'
-                  f"runpod.terminate_pod('{pod_id}')\"")
-        else:
+        if terminate:
             runpod.terminate_pod(pod_id)
             print(f"\npod {pod_id} terminated")
+        else:
+            print(f"\npod {pod_id} still running -- it bills until stopped")
+            print(f"  reuse:     --pod {pod_id}")
+            print(f"  terminate: --pod {pod_id} --down 'true'")
 
 
 if __name__ == "__main__":

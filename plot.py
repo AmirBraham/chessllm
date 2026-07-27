@@ -17,6 +17,7 @@ also reads medians directly -- follow across from 0.5.
 
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import matplotlib
@@ -127,6 +128,45 @@ def rates_panel(ax, model):
     ax.grid(axis="y", visible=False)
 
 
+def moves_panel(ax, model):
+    """Which moves it actually plays -- the degenerate-policy detector.
+
+    A published GRPO run on 8B models converged on pushing the a-pawn over 80%
+    of the time: a-pawn moves are nearly always legal and rarely catastrophic,
+    so it is the best constant answer when you cannot read the board. Mean
+    cp_loss improves while the model learns no chess at all. Concentration
+    here is what separates the two.
+    """
+    moves = [r["move"] for r in model["rows"] if r.get("move")]
+    if not moves:
+        ax.text(0.5, 0.5, "no legal moves produced", transform=ax.transAxes,
+                ha="center", va="center", color=INK_SOFT, fontsize=10)
+        ax.set_title("Which moves?", color=INK, fontsize=11, loc="left", pad=10)
+        style(ax)
+        return
+
+    counts = Counter(moves).most_common(12)
+    labels = [move for move, _ in counts][::-1]
+    shares = [100 * n / len(moves) for _, n in counts][::-1]
+
+    top_move, top_n = counts[0]
+    top_share = 100 * top_n / len(moves)
+
+    ax.barh(labels, shares, height=0.6, color=SERIES["model"], zorder=3)
+    for y, share in enumerate(shares):
+        ax.annotate(f"{share:.0f}%", xy=(share, y), xytext=(4, 0),
+                    textcoords="offset points", va="center",
+                    color=INK, fontsize=8)
+
+    verdict = "  <- degenerate" if top_share >= 20 else ""
+    ax.set_title(f"Which moves?  top: {top_move} at {top_share:.0f}%{verdict}",
+                 color=INK, fontsize=11, loc="left", pad=10)
+    ax.set_xlabel("% of legal answers", color=INK_SOFT, fontsize=9)
+    ax.set_xlim(0, max(shares) * 1.25)
+    style(ax)
+    ax.grid(axis="y", visible=False)
+
+
 def tokens_panel(ax, model):
     """Completion lengths, with the budget marked."""
     tokens = [r["tokens"] for r in model["rows"] if "tokens" in r]
@@ -134,6 +174,10 @@ def tokens_panel(ax, model):
         return
     budget = max(tokens)
 
+    # Every completion truncating gives one identical value, and matplotlib
+    # then picks a meaningless axis like 511.6-512.4.
+    if min(tokens) == budget:
+        ax.set_xlim(0, budget * 1.1)
     ax.hist(tokens, bins=30, color=SERIES["model"], zorder=3)
     ax.axvline(budget, color=INK_SOFT, linewidth=1, linestyle=":", alpha=0.7)
     # Truncated completions pile up exactly at the budget, so the tallest bar
@@ -159,15 +203,16 @@ def plot_results(path):
         None,
     )
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.4), facecolor=SURFACE)
-    fig.suptitle(path.stem, color=INK, fontsize=12, x=0.005, ha="left", y=0.99)
+    fig, axes = plt.subplots(2, 2, figsize=(13, 9), facecolor=SURFACE)
+    fig.suptitle(path.stem, color=INK, fontsize=12, x=0.005, ha="left", y=0.995)
 
-    ecdf_panel(axes[0], results)
+    ecdf_panel(axes[0][0], results)
     if model:
-        rates_panel(axes[1], model)
-        tokens_panel(axes[2], model)
+        rates_panel(axes[0][1], model)
+        tokens_panel(axes[1][0], model)
+        moves_panel(axes[1][1], model)
 
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
     png = path.with_suffix(".png")
     fig.savefig(png, dpi=150, facecolor=SURFACE)
     plt.close(fig)
