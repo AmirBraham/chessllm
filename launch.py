@@ -81,7 +81,24 @@ python -m pip install -q --no-cache-dir {POD_PACKAGES}
 # cuda.is_available() == False and everything still "works", just far slower
 # on a GPU you are paying for.
 python - <<'PY'
-import sys, torch
+import subprocess, sys
+print(f"python: {{sys.executable}}")
+try:
+    import torch
+except ImportError:
+    # The venv inherits system site-packages, so this means the image keeps
+    # torch somewhere else (a conda env, another interpreter). Report where it
+    # actually is instead of just failing.
+    print("torch NOT importable from this interpreter")
+    found = subprocess.run(
+        ["bash", "-lc", "ls -d /usr/lib/python3*/dist-packages/torch "
+                        "/opt/conda/lib/python3*/site-packages/torch "
+                        "/usr/local/lib/python3*/dist-packages/torch 2>/dev/null"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    print(f"torch found at: {{found or 'nowhere obvious'}}")
+    sys.exit(1)
+
 print(f"torch {{torch.__version__}}  cuda_available={{torch.cuda.is_available()}}")
 if not torch.cuda.is_available():
     print(f"built for CUDA {{torch.version.cuda}}; this host's driver is too old")
